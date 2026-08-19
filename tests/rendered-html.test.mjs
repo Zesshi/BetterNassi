@@ -33,7 +33,9 @@ test("server-renders the BetterNassi editor shell", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>BetterNassi<\/title>/i);
-  assert.match(html, /Nassi-Shneiderman diagram editor/);
+  assert.match(html, /Nassi-Shneiderman editor/);
+  assert.match(html, /Dark/);
+  assert.match(html, /Light/);
   assert.match(html, /Export PNG/);
   assert.match(html, /Order validation flow/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);

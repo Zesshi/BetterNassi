@@ -1,9 +1,10 @@
 "use client";
 
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 type BlockKind = "action" | "io" | "decision" | "loop";
 type ContainerKey = "root" | `${string}:then` | `${string}:else` | `${string}:body`;
+type Theme = "dark" | "light";
 
 type DiagramBlock = {
   id: string;
@@ -21,6 +22,7 @@ type DragPayload =
 
 const dragMime = "application/x-betternassi-block";
 const rootContainer: ContainerKey = "root";
+const themeStorageKey = "betternassi-theme";
 
 const palette: Array<{
   kind: BlockKind;
@@ -420,17 +422,48 @@ export function NassiEditor() {
   const [zoom, setZoom] = useState(92);
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isDraggingBlock, setIsDraggingBlock] = useState(false);
+  const [inspectorMode, setInspectorMode] = useState<"edit" | "code">("edit");
+  const [copyState, setCopyState] = useState("Copy code");
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") {
+      return "dark";
+    }
+
+    return window.localStorage.getItem(themeStorageKey) === "light"
+      ? "light"
+      : "dark";
+  });
   const paperRef = useRef<HTMLElement | null>(null);
 
   const selectedBlock = useMemo(
     () => findBlock(blocks, selectedId),
     [blocks, selectedId],
   );
+  const generatedCode = useMemo(
+    () => generateCode(diagramName, blocks),
+    [blocks, diagramName],
+  );
+  const blockStats = useMemo(() => countBlocks(blocks), [blocks]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem(themeStorageKey, theme);
+  }, [theme]);
 
   function addBlock(kind: BlockKind) {
     const block = createBlock(kind);
     setBlocks((current) => insertBlock(current, rootContainer, current.length, block));
     setSelectedId(block.id);
+  }
+
+  function addStepToContainer(container: ContainerKey) {
+    const block = createBlock("action");
+    setBlocks((current) =>
+      insertBlock(current, container, Number.MAX_SAFE_INTEGER, block),
+    );
+    setSelectedId(block.id);
+    setInspectorMode("edit");
   }
 
   function handleDrop(
@@ -441,6 +474,7 @@ export function NassiEditor() {
     event.preventDefault();
     event.stopPropagation();
     setActiveSlot(null);
+    setIsDraggingBlock(false);
 
     const payload = parseDragPayload(event);
     if (!payload) {
@@ -495,7 +529,16 @@ export function NassiEditor() {
   async function exportPng() {
     setIsExporting(true);
     try {
-      const blob = await renderDiagramToPng(diagramName, blocks);
+      let blob: Blob;
+
+      try {
+        blob = paperRef.current
+          ? await renderDiagramElementToPng(paperRef.current)
+          : await renderDiagramToPng(diagramName, blocks);
+      } catch {
+        blob = await renderDiagramToPng(diagramName, blocks);
+      }
+
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -507,19 +550,49 @@ export function NassiEditor() {
     }
   }
 
+  async function copyGeneratedCode() {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(generatedCode);
+    }
+    setCopyState("Copied");
+    window.setTimeout(() => setCopyState("Copy code"), 1400);
+  }
+
   return (
     <main className="editor-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            NS
+          <span className="brand-glyph" aria-hidden="true">
+            <span />
+            <span />
+            <span />
           </span>
           <div>
-            <p className="eyebrow">BetterNassi</p>
-            <h1>Nassi-Shneiderman diagram editor</h1>
+            <h1>BetterNassi</h1>
+            <p className="topbar-subtitle">Nassi-Shneiderman editor</p>
           </div>
         </div>
         <div className="topbar-actions">
+          <div className="topbar-stat" aria-label={`${blockStats} blocks`}>
+            <span>{blockStats}</span>
+            <small>blocks</small>
+          </div>
+          <div className="theme-switcher" aria-label="Theme" role="group">
+            <button
+              aria-pressed={theme === "dark"}
+              type="button"
+              onClick={() => setTheme("dark")}
+            >
+              Dark
+            </button>
+            <button
+              aria-pressed={theme === "light"}
+              type="button"
+              onClick={() => setTheme("light")}
+            >
+              Light
+            </button>
+          </div>
           <button className="ghost-button" type="button" onClick={clearDiagram}>
             Clear
           </button>
@@ -532,8 +605,10 @@ export function NassiEditor() {
       <section className="app-grid" aria-label="Diagram editor">
         <aside className="side-panel palette-panel" aria-label="Block palette">
           <div className="panel-heading">
-            <p className="eyebrow">Palette</p>
-            <h2>Blocks</h2>
+            <div>
+              <p className="eyebrow">Palette</p>
+              <h2>Structure</h2>
+            </div>
           </div>
           <div className="palette-list">
             {palette.map((item) => (
@@ -542,7 +617,12 @@ export function NassiEditor() {
                 draggable
                 key={item.kind}
                 onClick={() => addBlock(item.kind)}
+                onDragEnd={() => {
+                  setActiveSlot(null);
+                  setIsDraggingBlock(false);
+                }}
                 onDragStart={(event) => {
+                  setIsDraggingBlock(true);
                   event.dataTransfer.effectAllowed = "copy";
                   event.dataTransfer.setData(
                     dragMime,
@@ -583,6 +663,10 @@ export function NassiEditor() {
               />
               <output>{zoom}%</output>
             </label>
+            <div className="workspace-readout" aria-hidden="true">
+              <span>draft</span>
+              <strong>{blockStats}</strong>
+            </div>
           </div>
 
           <div className="canvas-viewport">
@@ -600,6 +684,7 @@ export function NassiEditor() {
                 activeSlot={activeSlot}
                 blocks={blocks}
                 container={rootContainer}
+                isDragging={isDraggingBlock}
                 onDelete={(id) => {
                   setBlocks((current) => removeBlock(current, id).blocks);
                   if (selectedId === id) {
@@ -610,6 +695,7 @@ export function NassiEditor() {
                 onSelect={setSelectedId}
                 selectedId={selectedId}
                 setActiveSlot={setActiveSlot}
+                setIsDragging={setIsDraggingBlock}
               />
             </section>
           </div>
@@ -617,11 +703,48 @@ export function NassiEditor() {
 
         <aside className="side-panel inspector-panel" aria-label="Block inspector">
           <div className="panel-heading">
-            <p className="eyebrow">Inspector</p>
-            <h2>{selectedBlock ? blockNames[selectedBlock.kind] : "Selection"}</h2>
+            <div>
+              <p className="eyebrow">Inspector</p>
+              <h2>
+                {inspectorMode === "code"
+                  ? "Generated code"
+                  : selectedBlock
+                    ? blockNames[selectedBlock.kind]
+                    : "Selection"}
+              </h2>
+            </div>
           </div>
 
-          {selectedBlock ? (
+          <div className="panel-tabs" role="tablist" aria-label="Inspector views">
+            <button
+              aria-selected={inspectorMode === "edit"}
+              role="tab"
+              type="button"
+              onClick={() => setInspectorMode("edit")}
+            >
+              Block
+            </button>
+            <button
+              aria-selected={inspectorMode === "code"}
+              role="tab"
+              type="button"
+              onClick={() => setInspectorMode("code")}
+            >
+              Code
+            </button>
+          </div>
+
+          {inspectorMode === "code" ? (
+            <div className="code-view">
+              <div className="code-actions">
+                <span>Pseudocode</span>
+                <button type="button" onClick={copyGeneratedCode}>
+                  {copyState}
+                </button>
+              </div>
+              <pre>{generatedCode}</pre>
+            </div>
+          ) : selectedBlock ? (
             <div className="inspector-form">
               <label>
                 <span>Text</span>
@@ -650,6 +773,22 @@ export function NassiEditor() {
                   }
                 />
               </label>
+              {selectedBlock.kind === "decision" ? (
+                <div className="branch-inspector-actions">
+                  <button
+                    type="button"
+                    onClick={() => addStepToContainer(`${selectedBlock.id}:then`)}
+                  >
+                    Add true step
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addStepToContainer(`${selectedBlock.id}:else`)}
+                  >
+                    Add false step
+                  </button>
+                </div>
+              ) : null}
               <div className="inspector-actions">
                 <button type="button" onClick={duplicateSelected}>
                   Duplicate
@@ -670,24 +809,100 @@ export function NassiEditor() {
   );
 }
 
+function generateCode(title: string, blocks: DiagramBlock[]) {
+  const lines = [`procedure ${toProcedureName(title)}`, ...renderCodeBlocks(blocks, 1), "end procedure"];
+  return lines.join("\n");
+}
+
+function countBlocks(blocks: DiagramBlock[]): number {
+  return blocks.reduce((total, block) => {
+    if (block.kind === "decision") {
+      return (
+        total +
+        1 +
+        countBlocks(block.thenBranch ?? []) +
+        countBlocks(block.elseBranch ?? [])
+      );
+    }
+
+    if (block.kind === "loop") {
+      return total + 1 + countBlocks(block.body ?? []);
+    }
+
+    return total + 1;
+  }, 0);
+}
+
+function renderCodeBlocks(blocks: DiagramBlock[], depth: number): string[] {
+  if (blocks.length === 0) {
+    return [`${indent(depth)}pass`];
+  }
+
+  return blocks.flatMap((block) => {
+    const detail = block.note ? ` // ${block.note}` : "";
+
+    if (block.kind === "io") {
+      return [`${indent(depth)}io "${block.label}"${detail}`];
+    }
+
+    if (block.kind === "action") {
+      return [`${indent(depth)}${block.label}${detail}`];
+    }
+
+    if (block.kind === "decision") {
+      return [
+        `${indent(depth)}if ${block.label} then${detail}`,
+        ...renderCodeBlocks(block.thenBranch ?? [], depth + 1),
+        `${indent(depth)}else`,
+        ...renderCodeBlocks(block.elseBranch ?? [], depth + 1),
+        `${indent(depth)}end if`,
+      ];
+    }
+
+    return [
+      `${indent(depth)}while ${block.label} do${detail}`,
+      ...renderCodeBlocks(block.body ?? [], depth + 1),
+      `${indent(depth)}end while`,
+    ];
+  });
+}
+
+function indent(depth: number) {
+  return "  ".repeat(depth);
+}
+
+function toProcedureName(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return normalized || "nassi_diagram";
+}
+
 function BlockList({
   activeSlot,
   blocks,
   container,
+  isDragging,
   onDelete,
   onDrop,
   onSelect,
   selectedId,
   setActiveSlot,
+  setIsDragging,
 }: {
   activeSlot: string | null;
   blocks: DiagramBlock[];
   container: ContainerKey;
+  isDragging: boolean;
   onDelete: (id: string) => void;
   onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
   onSelect: (id: string) => void;
   selectedId: string | null;
   setActiveSlot: (slot: string | null) => void;
+  setIsDragging: (isDragging: boolean) => void;
 }) {
   return (
     <div className={`block-list ${blocks.length === 0 ? "empty" : ""}`}>
@@ -695,6 +910,7 @@ function BlockList({
         activeSlot={activeSlot}
         container={container}
         index={0}
+        isDragging={isDragging}
         isEmpty={blocks.length === 0}
         onDrop={onDrop}
         setActiveSlot={setActiveSlot}
@@ -704,16 +920,19 @@ function BlockList({
           <DiagramBlockView
             activeSlot={activeSlot}
             block={block}
+            isDragging={isDragging}
             onDelete={onDelete}
             onDrop={onDrop}
             onSelect={onSelect}
             selectedId={selectedId}
             setActiveSlot={setActiveSlot}
+            setIsDragging={setIsDragging}
           />
           <DropSlot
             activeSlot={activeSlot}
             container={container}
             index={index + 1}
+            isDragging={isDragging}
             onDrop={onDrop}
             setActiveSlot={setActiveSlot}
           />
@@ -727,6 +946,7 @@ function DropSlot({
   activeSlot,
   container,
   index,
+  isDragging,
   isEmpty = false,
   onDrop,
   setActiveSlot,
@@ -734,6 +954,7 @@ function DropSlot({
   activeSlot: string | null;
   container: ContainerKey;
   index: number;
+  isDragging: boolean;
   isEmpty?: boolean;
   onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
   setActiveSlot: (slot: string | null) => void;
@@ -742,7 +963,9 @@ function DropSlot({
 
   return (
     <div
-      className={`drop-slot ${isEmpty ? "empty-slot" : ""} ${
+      className={`drop-slot ${isDragging ? "is-dragging" : ""} ${
+        isEmpty ? "empty-slot" : ""
+      } ${
         activeSlot === id ? "is-active" : ""
       }`}
       onDragLeave={() => setActiveSlot(null)}
@@ -753,7 +976,9 @@ function DropSlot({
       }}
       onDrop={(event) => onDrop(event, container, index)}
     >
-      {isEmpty ? <span>Drop block</span> : null}
+      {isEmpty || isDragging ? (
+        <span>{isDragging ? "Drop here" : "Drop block"}</span>
+      ) : null}
     </div>
   );
 }
@@ -761,19 +986,23 @@ function DropSlot({
 function DiagramBlockView({
   activeSlot,
   block,
+  isDragging,
   onDelete,
   onDrop,
   onSelect,
   selectedId,
   setActiveSlot,
+  setIsDragging,
 }: {
   activeSlot: string | null;
   block: DiagramBlock;
+  isDragging: boolean;
   onDelete: (id: string) => void;
   onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
   onSelect: (id: string) => void;
   selectedId: string | null;
   setActiveSlot: (slot: string | null) => void;
+  setIsDragging: (isDragging: boolean) => void;
 }) {
   const isSelected = selectedId === block.id;
 
@@ -785,9 +1014,13 @@ function DiagramBlockView({
         event.stopPropagation();
         onSelect(block.id);
       }}
-      onDragEnd={() => setActiveSlot(null)}
+      onDragEnd={() => {
+        setActiveSlot(null);
+        setIsDragging(false);
+      }}
       onDragStart={(event) => {
         event.stopPropagation();
+        setIsDragging(true);
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData(
           dragMime,
@@ -796,7 +1029,6 @@ function DiagramBlockView({
       }}
     >
       <div className="block-tools">
-        <span>{blockNames[block.kind]}</span>
         <button
           aria-label={`Delete ${block.label}`}
           onClick={(event) => {
@@ -805,7 +1037,7 @@ function DiagramBlockView({
           }}
           type="button"
         >
-          x
+          ×
         </button>
       </div>
 
@@ -817,29 +1049,31 @@ function DiagramBlockView({
           </div>
           <div className="decision-branches">
             <div className="branch-column">
-              <span className="branch-label">True</span>
               <BlockList
                 activeSlot={activeSlot}
                 blocks={block.thenBranch ?? []}
                 container={`${block.id}:then`}
+                isDragging={isDragging}
                 onDelete={onDelete}
                 onDrop={onDrop}
                 onSelect={onSelect}
                 selectedId={selectedId}
                 setActiveSlot={setActiveSlot}
+                setIsDragging={setIsDragging}
               />
             </div>
             <div className="branch-column">
-              <span className="branch-label">False</span>
               <BlockList
                 activeSlot={activeSlot}
                 blocks={block.elseBranch ?? []}
                 container={`${block.id}:else`}
+                isDragging={isDragging}
                 onDelete={onDelete}
                 onDrop={onDrop}
                 onSelect={onSelect}
                 selectedId={selectedId}
                 setActiveSlot={setActiveSlot}
+                setIsDragging={setIsDragging}
               />
             </div>
           </div>
@@ -858,11 +1092,13 @@ function DiagramBlockView({
               activeSlot={activeSlot}
               blocks={block.body ?? []}
               container={`${block.id}:body`}
+              isDragging={isDragging}
               onDelete={onDelete}
               onDrop={onDrop}
               onSelect={onSelect}
               selectedId={selectedId}
               setActiveSlot={setActiveSlot}
+              setIsDragging={setIsDragging}
             />
           </div>
         </>
@@ -929,6 +1165,98 @@ async function renderDiagramToPng(title: string, blocks: DiagramBlock[]) {
         reject(new Error("PNG export failed"));
       }
     }, "image/png");
+  });
+}
+
+async function renderDiagramElementToPng(source: HTMLElement) {
+  const width = Math.ceil(source.scrollWidth);
+  const height = Math.ceil(source.scrollHeight);
+  const clone = source.cloneNode(true) as HTMLElement;
+  clone.classList.add("export-copy");
+  clone.style.transform = "none";
+  clone.style.width = `${width}px`;
+  clone.style.minHeight = `${height}px`;
+  clone.querySelectorAll(".selected").forEach((item) => {
+    item.classList.remove("selected");
+  });
+
+  const styles = collectDocumentStyles();
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <foreignObject width="100%" height="100%">
+        <div xmlns="http://www.w3.org/1999/xhtml">
+          <style>
+            ${styles}
+            .export-copy {
+              box-shadow: none !important;
+              margin: 0 !important;
+              max-width: none !important;
+            }
+            .export-copy .block-tools,
+            .export-copy .drop-slot {
+              display: none !important;
+            }
+          </style>
+          ${clone.outerHTML}
+        </div>
+      </foreignObject>
+    </svg>
+  `;
+
+  const image = await loadSvgImage(svg);
+  const scale = 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available");
+  }
+
+  context.scale(scale, scale);
+  context.fillStyle = "#fdfdfb";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("PNG export failed"));
+      }
+    }, "image/png");
+  });
+}
+
+function collectDocumentStyles() {
+  return Array.from(document.styleSheets)
+    .map((sheet) => {
+      try {
+        return Array.from(sheet.cssRules)
+          .map((rule) => rule.cssText)
+          .join("\n");
+      } catch {
+        return "";
+      }
+    })
+    .join("\n");
+}
+
+function loadSvgImage(svg: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Diagram export image failed to load"));
+    };
+    image.src = url;
   });
 }
 
@@ -1028,14 +1356,6 @@ function drawBlock(
     context.fillStyle = "#111827";
     context.font = "700 20px Arial, sans-serif";
     drawWrappedText(context, block.label, x + width * 0.25, y + 33, width * 0.5, 24, 2, "center");
-    context.font = "600 13px Arial, sans-serif";
-    context.fillStyle = "#9a3412";
-    context.textAlign = "left";
-    context.fillText("True", x + 18, y + headHeight + 26);
-    context.textAlign = "right";
-    context.fillText("False", x + width - 18, y + headHeight + 26);
-    context.textAlign = "left";
-
     drawList(context, block.thenBranch ?? [], x, y + headHeight, width / 2);
     drawList(context, block.elseBranch ?? [], x + width / 2, y + headHeight, width / 2);
 
