@@ -582,7 +582,7 @@ function downloadBlob(blob: Blob, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-export function NassiEditor() {
+export function NassiEditor({ assetBasePath = "" }: { assetBasePath?: string } = {}) {
   const [blocks, setBlocks] = useState<DiagramBlock[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [diagramName, setDiagramName] = useState("Untitled diagram");
@@ -907,7 +907,7 @@ export function NassiEditor() {
             aria-hidden="true"
             className="brand-mark"
             height="34"
-            src="/favicon.svg"
+            src={`${assetBasePath}/favicon.svg`}
             width="34"
           />
           <div>
