@@ -1,6 +1,7 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Sun, Moon, Upload, Download, ImageDown, Trash2, Copy, X, PanelRight, Square, ArrowRightLeft, GitBranch, Repeat2, GripVertical, Plus, Code2, MousePointer2 } from "lucide-react";
 
 type BlockKind = "action" | "io" | "decision" | "loop";
 type ContainerKey = "root" | `${string}:then` | `${string}:else` | `${string}:body`;
@@ -20,9 +21,20 @@ type DragPayload =
   | { source: "palette"; kind: BlockKind }
   | { source: "diagram"; id: string };
 
+type ImportedDiagram = {
+  title: string;
+  blocks: DiagramBlock[];
+};
+
 const dragMime = "application/x-betternassi-block";
+const diagramFileFormat = "betternassi.diagram";
+const diagramFileVersion = 1;
+const inspectorDrawerMediaQuery = "(max-width: 1180px)";
 const rootContainer: ContainerKey = "root";
+const diagramStorageKey = "betternassi-diagram";
 const themeStorageKey = "betternassi-theme";
+const autoScrollEdge = 86;
+const autoScrollMaxSpeed = 22;
 
 const palette: Array<{
   kind: BlockKind;
@@ -67,6 +79,33 @@ function makeId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBlockKind(value: unknown): value is BlockKind {
+  return (
+    value === "action" ||
+    value === "io" ||
+    value === "decision" ||
+    value === "loop"
+  );
+}
+
+function readText(value: unknown, fallback: string) {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readBlockNote(kind: BlockKind, label: string, value: unknown) {
+  const note = readText(value, "");
+
+  if (kind === "io" && label === "Read input" && note === "data") {
+    return "";
+  }
+
+  return note;
+}
+
 function createBlock(kind: BlockKind): DiagramBlock {
   const id = makeId();
 
@@ -75,7 +114,7 @@ function createBlock(kind: BlockKind): DiagramBlock {
       id,
       kind,
       label: "Condition?",
-      note: "true / false",
+      note: "",
       thenBranch: [
         {
           id: makeId(),
@@ -100,7 +139,7 @@ function createBlock(kind: BlockKind): DiagramBlock {
       id,
       kind,
       label: "Repeat while condition is true",
-      note: "loop body",
+      note: "",
       body: [
         {
           id: makeId(),
@@ -116,61 +155,8 @@ function createBlock(kind: BlockKind): DiagramBlock {
     id,
     kind,
     label: kind === "io" ? "Read input" : "New process step",
-    note: kind === "io" ? "data" : "",
+    note: "",
   };
-}
-
-function createSampleDiagram(): DiagramBlock[] {
-  return [
-    {
-      id: "sample-start",
-      kind: "action",
-      label: "Start request",
-      note: "initialize context",
-    },
-    {
-      id: "sample-valid",
-      kind: "decision",
-      label: "Input valid?",
-      note: "validation gate",
-      thenBranch: [
-        {
-          id: "sample-read",
-          kind: "io",
-          label: "Read customer data",
-          note: "payload",
-        },
-        {
-          id: "sample-loop",
-          kind: "loop",
-          label: "For each item",
-          note: "order lines",
-          body: [
-            {
-              id: "sample-calc",
-              kind: "action",
-              label: "Calculate subtotal",
-              note: "price * quantity",
-            },
-          ],
-        },
-      ],
-      elseBranch: [
-        {
-          id: "sample-error",
-          kind: "action",
-          label: "Show validation message",
-          note: "stop flow",
-        },
-      ],
-    },
-    {
-      id: "sample-save",
-      kind: "action",
-      label: "Save result",
-      note: "finish",
-    },
-  ];
 }
 
 function updateContainer(
@@ -318,6 +304,51 @@ function findBlock(blocks: DiagramBlock[], id: string | null): DiagramBlock | nu
   return null;
 }
 
+function findBlockPosition(
+  blocks: DiagramBlock[],
+  id: string,
+  container: ContainerKey = rootContainer,
+): { container: ContainerKey; index: number } | null {
+  for (const [index, block] of blocks.entries()) {
+    if (block.id === id) {
+      return { container, index };
+    }
+
+    if (block.kind === "decision") {
+      const thenPosition = findBlockPosition(
+        block.thenBranch ?? [],
+        id,
+        `${block.id}:then`,
+      );
+      if (thenPosition) {
+        return thenPosition;
+      }
+
+      const elsePosition = findBlockPosition(
+        block.elseBranch ?? [],
+        id,
+        `${block.id}:else`,
+      );
+      if (elsePosition) {
+        return elsePosition;
+      }
+    }
+
+    if (block.kind === "loop") {
+      const bodyPosition = findBlockPosition(
+        block.body ?? [],
+        id,
+        `${block.id}:body`,
+      );
+      if (bodyPosition) {
+        return bodyPosition;
+      }
+    }
+  }
+
+  return null;
+}
+
 function updateBlock(
   blocks: DiagramBlock[],
   id: string,
@@ -401,6 +432,109 @@ function insertAfter(
   return { blocks: next, inserted };
 }
 
+function normalizeImportedBlocks(value: unknown): DiagramBlock[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const blocks: DiagramBlock[] = [];
+
+  for (const item of value) {
+    const block = normalizeImportedBlock(item);
+    if (!block) {
+      return null;
+    }
+
+    blocks.push(block);
+  }
+
+  return blocks;
+}
+
+function normalizeImportedBlock(value: unknown): DiagramBlock | null {
+  if (!isRecord(value) || !isBlockKind(value.kind)) {
+    return null;
+  }
+
+  const block: DiagramBlock = {
+    id: makeId(),
+    kind: value.kind,
+    label: readText(value.label, blockNames[value.kind]),
+    note: "",
+  };
+  block.note = readBlockNote(value.kind, block.label, value.note);
+
+  if (value.kind === "decision") {
+    const thenBranch = normalizeImportedBlocks(value.thenBranch ?? []);
+    const elseBranch = normalizeImportedBlocks(value.elseBranch ?? []);
+
+    if (!thenBranch || !elseBranch) {
+      return null;
+    }
+
+    block.thenBranch = thenBranch;
+    block.elseBranch = elseBranch;
+  }
+
+  if (value.kind === "loop") {
+    const body = normalizeImportedBlocks(value.body ?? []);
+
+    if (!body) {
+      return null;
+    }
+
+    block.body = body;
+  }
+
+  return block;
+}
+
+function parseDiagramFile(raw: string): ImportedDiagram | null {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const blocks = normalizeImportedBlocks(parsed.blocks);
+  if (!blocks) {
+    return null;
+  }
+
+  return {
+    title: readText(parsed.title, readText(parsed.diagramName, "Imported diagram")),
+    blocks,
+  };
+}
+
+function createDiagramPayload(title: string, blocks: DiagramBlock[]) {
+  return {
+    format: diagramFileFormat,
+    version: diagramFileVersion,
+    title,
+    blocks,
+  };
+}
+
+function readSavedDiagram() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(diagramStorageKey);
+    return raw ? parseDiagramFile(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseDragPayload(event: React.DragEvent): DragPayload | null {
   const raw = event.dataTransfer.getData(dragMime);
 
@@ -415,26 +549,64 @@ function parseDragPayload(event: React.DragEvent): DragPayload | null {
   }
 }
 
+function getAutoScrollDelta(distanceFromEdge: number) {
+  if (distanceFromEdge > autoScrollEdge) {
+    return 0;
+  }
+
+  const intensity = 1 - Math.max(distanceFromEdge, 0) / autoScrollEdge;
+  return Math.ceil(intensity * autoScrollMaxSpeed);
+}
+
+function getDropEffect(event: React.DragEvent): "copy" | "move" {
+  const { effectAllowed } = event.dataTransfer;
+
+  if (
+    effectAllowed === "move" ||
+    effectAllowed === "copyMove" ||
+    effectAllowed === "linkMove" ||
+    effectAllowed === "all"
+  ) {
+    return "move";
+  }
+
+  return "copy";
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export function NassiEditor() {
-  const [blocks, setBlocks] = useState<DiagramBlock[]>(() => createSampleDiagram());
-  const [selectedId, setSelectedId] = useState<string | null>("sample-valid");
-  const [diagramName, setDiagramName] = useState("Order validation flow");
-  const [zoom, setZoom] = useState(92);
+  const [blocks, setBlocks] = useState<DiagramBlock[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [diagramName, setDiagramName] = useState("Untitled diagram");
+  const [zoom, setZoom] = useState(100);
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isDraggingBlock, setIsDraggingBlock] = useState(false);
-  const [inspectorMode, setInspectorMode] = useState<"edit" | "code">("edit");
-  const [copyState, setCopyState] = useState("Copy code");
-  const [theme, setTheme] = useState<Theme>(() => {
+  const [hasRestoredDiagram, setHasRestoredDiagram] = useState(false);
+  const [isInspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
+  const [usesInspectorDrawer, setUsesInspectorDrawer] = useState(() => {
     if (typeof window === "undefined") {
-      return "dark";
+      return false;
     }
 
-    return window.localStorage.getItem(themeStorageKey) === "light"
-      ? "light"
-      : "dark";
+    return window.matchMedia(inspectorDrawerMediaQuery).matches;
   });
+  const [inspectorMode, setInspectorMode] = useState<"edit" | "code">("edit");
+  const [copyState, setCopyState] = useState("Copy code");
+  const [theme, setTheme] = useState<Theme>("light");
+  const [hasRestoredTheme, setHasRestoredTheme] = useState(false);
   const paperRef = useRef<HTMLElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const dragPointRef = useRef<{ x: number; y: number } | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedBlock = useMemo(
     () => findBlock(blocks, selectedId),
@@ -444,17 +616,127 @@ export function NassiEditor() {
     () => generateCode(diagramName, blocks),
     [blocks, diagramName],
   );
-  const blockStats = useMemo(() => countBlocks(blocks), [blocks]);
 
   useEffect(() => {
+    try {
+      setTheme(window.localStorage.getItem(themeStorageKey) === "dark" ? "dark" : "light");
+    } catch {
+      // Keep the default when browser storage is unavailable.
+    }
+    setHasRestoredTheme(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasRestoredTheme) return;
     document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem(themeStorageKey, theme);
-  }, [theme]);
+    try {
+      window.localStorage.setItem(themeStorageKey, theme);
+    } catch {
+      // Theme switching still works without persistence.
+    }
+  }, [theme, hasRestoredTheme]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setInspectorDrawerOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, []);
+
+  useEffect(() => {
+    const savedDiagram = readSavedDiagram();
+
+    if (savedDiagram) {
+      setDiagramName(savedDiagram.title || "Untitled diagram");
+      setBlocks(savedDiagram.blocks);
+    }
+
+    setHasRestoredDiagram(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasRestoredDiagram) {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        diagramStorageKey,
+        JSON.stringify(createDiagramPayload(diagramName, blocks)),
+      );
+    } catch {
+      // Autosave is best-effort; file export remains available if storage is blocked.
+    }
+  }, [blocks, diagramName, hasRestoredDiagram]);
+
+  useEffect(() => {
+    const query = window.matchMedia(inspectorDrawerMediaQuery);
+    const updateLayoutMode = () => setUsesInspectorDrawer(query.matches);
+
+    updateLayoutMode();
+    query.addEventListener("change", updateLayoutMode);
+
+    return () => query.removeEventListener("change", updateLayoutMode);
+  }, []);
+
+  useEffect(() => {
+    if (!isDraggingBlock) {
+      dragPointRef.current = null;
+      return;
+    }
+
+    let frameId = 0;
+
+    function handleDragOver(event: DragEvent) {
+      dragPointRef.current = { x: event.clientX, y: event.clientY };
+      if (event.target instanceof Node && !viewportRef.current?.contains(event.target)) {
+        setActiveSlot(null);
+      }
+    }
+
+    function tick() {
+      const viewport = viewportRef.current;
+      const point = dragPointRef.current;
+
+      if (viewport && point) {
+        const bounds = viewport.getBoundingClientRect();
+        const isInside =
+          point.x >= bounds.left &&
+          point.x <= bounds.right &&
+          point.y >= bounds.top &&
+          point.y <= bounds.bottom;
+
+        if (isInside) {
+          const left = getAutoScrollDelta(point.x - bounds.left);
+          const right = getAutoScrollDelta(bounds.right - point.x);
+          const top = getAutoScrollDelta(point.y - bounds.top);
+          const bottom = getAutoScrollDelta(bounds.bottom - point.y);
+
+          viewport.scrollBy({
+            left: right - left,
+            top: bottom - top,
+          });
+        }
+      }
+
+      frameId = window.requestAnimationFrame(tick);
+    }
+
+    window.addEventListener("dragover", handleDragOver, true);
+    frameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.removeEventListener("dragover", handleDragOver, true);
+      window.cancelAnimationFrame(frameId);
+      dragPointRef.current = null;
+    };
+  }, [isDraggingBlock]);
 
   function addBlock(kind: BlockKind) {
     const block = createBlock(kind);
     setBlocks((current) => insertBlock(current, rootContainer, current.length, block));
-    setSelectedId(block.id);
+    selectBlockAfterAutomaticPlacement(block.id);
   }
 
   function addStepToContainer(container: ContainerKey) {
@@ -463,7 +745,25 @@ export function NassiEditor() {
       insertBlock(current, container, Number.MAX_SAFE_INTEGER, block),
     );
     setSelectedId(block.id);
+    setInspectorDrawerOpen(true);
     setInspectorMode("edit");
+  }
+
+  function selectBlock(id: string) {
+    setSelectedId(id);
+    setInspectorMode("edit");
+    setInspectorDrawerOpen(true);
+  }
+
+  function selectBlockAfterAutomaticPlacement(id: string) {
+    if (usesInspectorDrawer) {
+      setSelectedId(null);
+      setInspectorDrawerOpen(false);
+      return;
+    }
+
+    setSelectedId(id);
+    setInspectorDrawerOpen(true);
   }
 
   function handleDrop(
@@ -484,19 +784,25 @@ export function NassiEditor() {
     if (payload.source === "palette") {
       const block = createBlock(payload.kind);
       setBlocks((current) => insertBlock(current, container, index, block));
-      setSelectedId(block.id);
+      selectBlockAfterAutomaticPlacement(block.id);
       return;
     }
 
     setBlocks((current) => {
+      const sourcePosition = findBlockPosition(current, payload.id);
       const result = removeBlock(current, payload.id);
       if (!result.removed || !containerExists(result.blocks, container)) {
         return current;
       }
 
-      return insertBlock(result.blocks, container, index, result.removed);
+      const targetIndex =
+        sourcePosition?.container === container && sourcePosition.index < index
+          ? index - 1
+          : index;
+
+      return insertBlock(result.blocks, container, targetIndex, result.removed);
     });
-    setSelectedId(payload.id);
+    selectBlockAfterAutomaticPlacement(payload.id);
   }
 
   function deleteSelected() {
@@ -506,6 +812,7 @@ export function NassiEditor() {
 
     setBlocks((current) => removeBlock(current, selectedId).blocks);
     setSelectedId(null);
+    setInspectorDrawerOpen(false);
   }
 
   function duplicateSelected() {
@@ -519,32 +826,65 @@ export function NassiEditor() {
       return result.inserted ? result.blocks : [...current, copy];
     });
     setSelectedId(copy.id);
+    setInspectorDrawerOpen(true);
   }
 
   function clearDiagram() {
+    if (!window.confirm("Clear the entire diagram? This cannot be undone.")) {
+      return;
+    }
+
     setBlocks([]);
     setSelectedId(null);
+    setInspectorDrawerOpen(false);
+  }
+
+  function exportDiagramFile() {
+    const payload = {
+      ...createDiagramPayload(diagramName, blocks),
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+      type: "application/json",
+    });
+
+    downloadBlob(blob, `${slugify(diagramName || "nassi-diagram")}.betternassi`);
+  }
+
+  async function importDiagramFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const imported = parseDiagramFile(await file.text());
+      if (!imported) {
+        throw new Error("Invalid diagram file");
+      }
+
+      setDiagramName(imported.title || "Imported diagram");
+      setBlocks(imported.blocks);
+      setSelectedId(null);
+      setInspectorDrawerOpen(false);
+      setInspectorMode("edit");
+      setActiveSlot(null);
+      setIsDraggingBlock(false);
+    } catch {
+      window.alert("This file could not be imported as a BetterNassi diagram.");
+    }
   }
 
   async function exportPng() {
     setIsExporting(true);
     try {
-      let blob: Blob;
-
-      try {
-        blob = paperRef.current
-          ? await renderDiagramElementToPng(paperRef.current)
-          : await renderDiagramToPng(diagramName, blocks);
-      } catch {
-        blob = await renderDiagramToPng(diagramName, blocks);
-      }
-
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${slugify(diagramName || "nassi-diagram")}.png`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      if (!paperRef.current) return;
+      const blob = await renderDiagramElementToPng(paperRef.current);
+      downloadBlob(blob, `${slugify(diagramName || "nassi-diagram")}.png`);
+    } catch {
+      window.alert("The image could not be exported. Please try again.");
     } finally {
       setIsExporting(false);
     }
@@ -562,53 +902,77 @@ export function NassiEditor() {
     <main className="editor-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <span className="brand-glyph" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
+          <img
+            alt=""
+            aria-hidden="true"
+            className="brand-mark"
+            height="34"
+            src="/favicon.svg"
+            width="34"
+          />
           <div>
             <h1>BetterNassi</h1>
             <p className="topbar-subtitle">Nassi-Shneiderman editor</p>
           </div>
         </div>
         <div className="topbar-actions">
-          <div className="topbar-stat" aria-label={`${blockStats} blocks`}>
-            <span>{blockStats}</span>
-            <small>blocks</small>
-          </div>
           <div className="theme-switcher" aria-label="Theme" role="group">
             <button
-              aria-pressed={theme === "dark"}
-              type="button"
-              onClick={() => setTheme("dark")}
-            >
-              Dark
-            </button>
-            <button
+              aria-label="Light theme"
               aria-pressed={theme === "light"}
+              title="Light theme"
               type="button"
               onClick={() => setTheme("light")}
             >
-              Light
+              <Sun size={16} aria-hidden="true" />
+            </button>
+            <button
+              aria-label="Dark theme"
+              aria-pressed={theme === "dark"}
+              title="Dark theme"
+              type="button"
+              onClick={() => setTheme("dark")}
+            >
+              <Moon size={16} aria-hidden="true" />
             </button>
           </div>
-          <button className="ghost-button" type="button" onClick={clearDiagram}>
-            Clear
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+          >
+            <Upload size={16} aria-hidden="true" /> Import File
           </button>
-          <button className="primary-button" type="button" onClick={exportPng}>
+          <button className="ghost-button" type="button" onClick={exportDiagramFile}>
+            <Download size={16} aria-hidden="true" /> Export File
+          </button>
+          <button className="ghost-button" type="button" onClick={exportPng} disabled={isExporting}>
+            <ImageDown size={16} aria-hidden="true" />
             {isExporting ? "Exporting" : "Export PNG"}
           </button>
+          <input
+            ref={importInputRef}
+            className="file-input"
+            type="file"
+            accept=".betternassi,.json,application/json"
+            onChange={importDiagramFile}
+          />
         </div>
       </header>
 
-      <section className="app-grid" aria-label="Diagram editor">
+      <section className={`app-grid ${isInspectorDrawerOpen ? "inspector-open" : ""}`} aria-label="Diagram editor">
         <aside className="side-panel palette-panel" aria-label="Block palette">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Palette</p>
-              <h2>Structure</h2>
+              <h2>Blocks</h2>
             </div>
+            <button className="inspector-toggle icon-button" type="button"
+              title={isInspectorDrawerOpen ? "Close inspector" : "Open inspector"}
+              aria-label={isInspectorDrawerOpen ? "Close inspector panel" : "Open inspector"}
+              aria-expanded={isInspectorDrawerOpen}
+              onClick={() => setInspectorDrawerOpen((open) => !open)}>
+              <PanelRight size={18} />
+            </button>
           </div>
           <div className="palette-list">
             {palette.map((item) => (
@@ -631,54 +995,67 @@ export function NassiEditor() {
                 }}
                 type="button"
               >
-                <span className="palette-shortcut">{item.shortcut}</span>
+                <span className="palette-shortcut" aria-hidden="true">
+                  {item.kind === "action" ? <Square size={20} /> : item.kind === "io" ? <ArrowRightLeft size={20} /> : item.kind === "decision" ? <GitBranch size={20} /> : <Repeat2 size={20} />}
+                </span>
                 <span>
                   <strong>{item.name}</strong>
                   <small>{item.description}</small>
                 </span>
+                <GripVertical className="palette-grip" size={16} aria-hidden="true" />
               </button>
             ))}
+          </div>
+          <div className="palette-view-controls">
+            <label className="zoom-control">
+              <span>Zoom</span>
+              <input aria-label="Canvas zoom" max="120" min="70" type="range" value={zoom}
+                onChange={(event) => setZoom(Number(event.target.value))} />
+              <output>{zoom}%</output>
+            </label>
+          </div>
+          <div className="palette-footer">
+            <button
+              className="clear-diagram-button"
+              type="button"
+              onClick={clearDiagram}
+            >
+              <Trash2 size={15} aria-hidden="true" /> Clear Diagram
+            </button>
           </div>
         </aside>
 
         <section className="workspace-panel" aria-label="Diagram workspace">
-          <div className="workspace-toolbar">
-            <label className="title-field">
-              <span>Diagram</span>
-              <input
-                aria-label="Diagram name"
-                value={diagramName}
-                onChange={(event) => setDiagramName(event.target.value)}
-              />
-            </label>
-            <label className="zoom-control">
-              <span>Zoom</span>
-              <input
-                aria-label="Canvas zoom"
-                max="120"
-                min="70"
-                onChange={(event) => setZoom(Number(event.target.value))}
-                type="range"
-                value={zoom}
-              />
-              <output>{zoom}%</output>
-            </label>
-            <div className="workspace-readout" aria-hidden="true">
-              <span>draft</span>
-              <strong>{blockStats}</strong>
-            </div>
-          </div>
-
-          <div className="canvas-viewport">
+          <div className="canvas-viewport" ref={viewportRef}
+            onDragOver={(event) => {
+              if (event.target !== event.currentTarget || !event.dataTransfer.types.includes(dragMime)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = getDropEffect(event);
+              setActiveSlot(`${rootContainer}-${blocks.length}`);
+            }}
+            onDrop={(event) => {
+              if (event.target === event.currentTarget) handleDrop(event, rootContainer, blocks.length);
+            }}
+          >
             <section
               aria-label={diagramName}
               className="diagram-paper"
               ref={paperRef}
-              style={{ transform: `scale(${zoom / 100})` }}
+              style={{ zoom: zoom / 100, minWidth: Math.max(440, listWidth(blocks)) }}
             >
               <div className="paper-title">
                 <span>Nassi-Shneiderman</span>
-                <strong>{diagramName}</strong>
+                <div className="editable-title">
+                  <strong className="title-mirror" aria-hidden="true">{diagramName || "Untitled diagram"}</strong>
+                  <textarea aria-label="Diagram name" rows={1} value={diagramName}
+                    placeholder="Untitled diagram"
+                    onChange={(event) => setDiagramName(event.target.value.replace(/[\r\n]+/g, " "))}
+                    onBlur={() => { if (!diagramName.trim()) setDiagramName("Untitled diagram"); }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+                    }}
+                  />
+                </div>
               </div>
               <BlockList
                 activeSlot={activeSlot}
@@ -689,10 +1066,11 @@ export function NassiEditor() {
                   setBlocks((current) => removeBlock(current, id).blocks);
                   if (selectedId === id) {
                     setSelectedId(null);
+                    setInspectorDrawerOpen(false);
                   }
                 }}
                 onDrop={handleDrop}
-                onSelect={setSelectedId}
+                onSelect={selectBlock}
                 selectedId={selectedId}
                 setActiveSlot={setActiveSlot}
                 setIsDragging={setIsDraggingBlock}
@@ -701,18 +1079,31 @@ export function NassiEditor() {
           </div>
         </section>
 
-        <aside className="side-panel inspector-panel" aria-label="Block inspector">
+        <aside
+          className={`side-panel inspector-panel ${
+            isInspectorDrawerOpen ? "drawer-open" : ""
+          }`}
+          aria-label="Block inspector"
+        >
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Inspector</p>
+              <p className="eyebrow">Properties</p>
               <h2>
                 {inspectorMode === "code"
                   ? "Generated code"
-                  : selectedBlock
-                    ? blockNames[selectedBlock.kind]
-                    : "Selection"}
+                : selectedBlock
+                  ? blockNames[selectedBlock.kind]
+                  : "Selection"}
               </h2>
             </div>
+            <button
+              aria-label="Close inspector"
+              className="drawer-close"
+              type="button"
+              onClick={() => setInspectorDrawerOpen(false)}
+            >
+              <X size={18} />
+            </button>
           </div>
 
           <div className="panel-tabs" role="tablist" aria-label="Inspector views">
@@ -722,7 +1113,7 @@ export function NassiEditor() {
               type="button"
               onClick={() => setInspectorMode("edit")}
             >
-              Block
+              <MousePointer2 size={15} aria-hidden="true" /> Block
             </button>
             <button
               aria-selected={inspectorMode === "code"}
@@ -730,7 +1121,7 @@ export function NassiEditor() {
               type="button"
               onClick={() => setInspectorMode("code")}
             >
-              Code
+              <Code2 size={16} aria-hidden="true" /> Code
             </button>
           </div>
 
@@ -739,7 +1130,7 @@ export function NassiEditor() {
               <div className="code-actions">
                 <span>Pseudocode</span>
                 <button type="button" onClick={copyGeneratedCode}>
-                  {copyState}
+                  <Copy size={14} aria-hidden="true" /> {copyState}
                 </button>
               </div>
               <pre>{generatedCode}</pre>
@@ -791,15 +1182,16 @@ export function NassiEditor() {
               ) : null}
               <div className="inspector-actions">
                 <button type="button" onClick={duplicateSelected}>
-                  Duplicate
+                  <Copy size={15} aria-hidden="true" /> Duplicate
                 </button>
                 <button className="danger-button" type="button" onClick={deleteSelected}>
-                  Delete
+                  <Trash2 size={15} aria-hidden="true" /> Delete
                 </button>
               </div>
             </div>
           ) : (
             <div className="empty-inspector">
+              <MousePointer2 size={26} strokeWidth={1.3} aria-hidden="true" />
               <span>No block selected</span>
             </div>
           )}
@@ -812,25 +1204,6 @@ export function NassiEditor() {
 function generateCode(title: string, blocks: DiagramBlock[]) {
   const lines = [`procedure ${toProcedureName(title)}`, ...renderCodeBlocks(blocks, 1), "end procedure"];
   return lines.join("\n");
-}
-
-function countBlocks(blocks: DiagramBlock[]): number {
-  return blocks.reduce((total, block) => {
-    if (block.kind === "decision") {
-      return (
-        total +
-        1 +
-        countBlocks(block.thenBranch ?? []) +
-        countBlocks(block.elseBranch ?? [])
-      );
-    }
-
-    if (block.kind === "loop") {
-      return total + 1 + countBlocks(block.body ?? []);
-    }
-
-    return total + 1;
-  }, 0);
 }
 
 function renderCodeBlocks(blocks: DiagramBlock[], depth: number): string[] {
@@ -881,21 +1254,29 @@ function toProcedureName(value: string) {
   return normalized || "nassi_diagram";
 }
 
-function BlockList({
-  activeSlot,
-  blocks,
-  container,
-  isDragging,
-  onDelete,
-  onDrop,
-  onSelect,
-  selectedId,
-  setActiveSlot,
-  setIsDragging,
-}: {
+function blockRows(block: DiagramBlock): number {
+  if (block.kind === "decision") {
+    return 1 + Math.max(listRows(block.thenBranch ?? []), listRows(block.elseBranch ?? []));
+  }
+  if (block.kind === "loop") return 1 + listRows(block.body ?? []);
+  return 1;
+}
+
+function listRows(blocks: DiagramBlock[]): number {
+  return Math.max(1, blocks.reduce((total, block) => total + blockRows(block), 0));
+}
+
+function listWidth(blocks: DiagramBlock[]): number {
+  return Math.max(180, ...blocks.map((block): number => {
+    if (block.kind === "decision") {
+      return 2 * Math.max(listWidth(block.thenBranch ?? []), listWidth(block.elseBranch ?? []));
+    }
+    return block.kind === "loop" ? 28 + listWidth(block.body ?? []) : 180;
+  }));
+}
+
+type BlockViewProps = {
   activeSlot: string | null;
-  blocks: DiagramBlock[];
-  container: ContainerKey;
   isDragging: boolean;
   onDelete: (id: string) => void;
   onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
@@ -903,213 +1284,169 @@ function BlockList({
   selectedId: string | null;
   setActiveSlot: (slot: string | null) => void;
   setIsDragging: (isDragging: boolean) => void;
-}) {
+};
+
+function BlockList({
+  blocks, container, rows = listRows(blocks), ...props
+}: BlockViewProps & { blocks: DiagramBlock[]; container: ContainerKey; rows?: number }) {
+  const isRoot = container === rootContainer;
+  const active = props.isDragging && props.activeSlot?.startsWith(`${container}-`);
   return (
-    <div className={`block-list ${blocks.length === 0 ? "empty" : ""}`}>
-      <DropSlot
-        activeSlot={activeSlot}
-        container={container}
-        index={0}
-        isDragging={isDragging}
-        isEmpty={blocks.length === 0}
-        onDrop={onDrop}
-        setActiveSlot={setActiveSlot}
-      />
-      {blocks.map((block, index) => (
-        <Fragment key={block.id}>
-          <DiagramBlockView
-            activeSlot={activeSlot}
-            block={block}
-            isDragging={isDragging}
-            onDelete={onDelete}
-            onDrop={onDrop}
-            onSelect={onSelect}
-            selectedId={selectedId}
-            setActiveSlot={setActiveSlot}
-            setIsDragging={setIsDragging}
-          />
-          <DropSlot
-            activeSlot={activeSlot}
-            container={container}
-            index={index + 1}
-            isDragging={isDragging}
-            onDrop={onDrop}
-            setActiveSlot={setActiveSlot}
-          />
-        </Fragment>
+    <div
+      className={`block-list ${isRoot ? "root-list" : ""} ${blocks.length ? "" : "empty"} ${active ? "drop-container" : ""}`}
+      data-container={container}
+      style={{ gridTemplateRows: isRoot ? `repeat(${rows}, minmax(80px, auto))` : undefined }}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes(dragMime)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = getDropEffect(event);
+        props.setActiveSlot(`${container}-${blocks.length}`);
+      }}
+      onDrop={(event) => props.onDrop(event, container, blocks.length)}
+    >
+      {blocks.length === 0 ? (
+        <div className={`empty-target ${active ? "is-active" : ""}`}>
+          <Plus size={20} aria-hidden="true" />
+          <span>{isRoot ? "Add your first block" : "Empty branch"}</span>
+        </div>
+      ) : blocks.map((block, index) => (
+        <DiagramBlockView
+          key={block.id}
+          {...props}
+          block={block}
+          container={container}
+          index={index}
+          rows={blockRows(block) + (index === blocks.length - 1 ? rows - listRows(blocks) : 0)}
+        />
       ))}
     </div>
   );
 }
 
-function DropSlot({
-  activeSlot,
-  container,
-  index,
-  isDragging,
-  isEmpty = false,
-  onDrop,
-  setActiveSlot,
-}: {
-  activeSlot: string | null;
-  container: ContainerKey;
-  index: number;
-  isDragging: boolean;
-  isEmpty?: boolean;
-  onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
-  setActiveSlot: (slot: string | null) => void;
-}) {
-  const id = `${container}-${index}`;
-
-  return (
-    <div
-      className={`drop-slot ${isDragging ? "is-dragging" : ""} ${
-        isEmpty ? "empty-slot" : ""
-      } ${
-        activeSlot === id ? "is-active" : ""
-      }`}
-      onDragLeave={() => setActiveSlot(null)}
-      onDragOver={(event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
-        setActiveSlot(id);
-      }}
-      onDrop={(event) => onDrop(event, container, index)}
-    >
-      {isEmpty || isDragging ? (
-        <span>{isDragging ? "Drop here" : "Drop block"}</span>
-      ) : null}
-    </div>
-  );
-}
-
 function DiagramBlockView({
-  activeSlot,
-  block,
-  isDragging,
-  onDelete,
-  onDrop,
-  onSelect,
-  selectedId,
-  setActiveSlot,
-  setIsDragging,
-}: {
-  activeSlot: string | null;
-  block: DiagramBlock;
-  isDragging: boolean;
-  onDelete: (id: string) => void;
-  onDrop: (event: React.DragEvent, container: ContainerKey, index: number) => void;
-  onSelect: (id: string) => void;
-  selectedId: string | null;
-  setActiveSlot: (slot: string | null) => void;
-  setIsDragging: (isDragging: boolean) => void;
-}) {
-  const isSelected = selectedId === block.id;
+  block, container, index, rows, ...props
+}: BlockViewProps & { block: DiagramBlock; container: ContainerKey; index: number; rows: number }) {
+  const isSelected = props.selectedId === block.id;
+  const before = props.isDragging && props.activeSlot === `${container}-${index}`;
+  const after = props.isDragging && props.activeSlot === `${container}-${index + 1}`;
+  const composite = block.kind === "decision" || block.kind === "loop";
+
+  function targetAt(event: React.DragEvent<HTMLElement>): { container: ContainerKey; index: number } {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const head = event.currentTarget.querySelector(":scope > .decision-head, :scope > .loop-head");
+    const headBounds = head?.getBoundingClientRect();
+    if (composite && headBounds && event.clientY > bounds.top + 16 && event.clientY < headBounds.bottom) {
+      return {
+        container: block.kind === "loop" ? `${block.id}:body` :
+          event.clientX < bounds.left + bounds.width / 2 ? `${block.id}:then` : `${block.id}:else`,
+        index: 0,
+      };
+    }
+    if (block.kind === "loop" && (event.target as HTMLElement).closest(".loop-rail")) {
+      return { container: `${block.id}:body`, index: block.body?.length ?? 0 };
+    }
+    return { container, index: event.clientY < bounds.top + bounds.height / 2 ? index : index + 1 };
+  }
+
+  function hover(event: React.DragEvent<HTMLElement>, edgeOnly = false) {
+    if (!event.dataTransfer.types.includes(dragMime)) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (edgeOnly && (!composite || (event.clientY > bounds.top + 8 && event.clientY < bounds.bottom - 8))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = getDropEffect(event);
+    const target = edgeOnly ? { container, index: event.clientY < bounds.top + 8 ? index : index + 1 } : targetAt(event);
+    props.setActiveSlot(`${target.container}-${target.index}`);
+  }
 
   return (
     <article
-      className={`nassi-block ${block.kind} ${isSelected ? "selected" : ""}`}
+      className={`nassi-block ${block.kind} ${isSelected ? "selected" : ""} ${before ? "insert-before" : ""} ${after ? "insert-after" : ""}`}
+      data-block-id={block.id}
+      data-index={index}
+      style={{ gridRow: `span ${rows}` }}
       draggable
+      tabIndex={0}
+      aria-label={`${blockNames[block.kind]}: ${block.label}`}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          props.onSelect(block.id);
+        }
+      }}
       onClick={(event) => {
         event.stopPropagation();
-        onSelect(block.id);
-      }}
-      onDragEnd={() => {
-        setActiveSlot(null);
-        setIsDragging(false);
+        props.onSelect(block.id);
       }}
       onDragStart={(event) => {
         event.stopPropagation();
-        setIsDragging(true);
+        props.setIsDragging(true);
         event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData(
-          dragMime,
-          JSON.stringify({ source: "diagram", id: block.id }),
-        );
+        event.dataTransfer.setData(dragMime, JSON.stringify({ source: "diagram", id: block.id }));
+      }}
+      onDragEnd={() => {
+        props.setActiveSlot(null);
+        props.setIsDragging(false);
+      }}
+      onDragOverCapture={(event) => hover(event, true)}
+      onDropCapture={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (composite && (event.clientY <= bounds.top + 8 || event.clientY >= bounds.bottom - 8)) {
+          props.onDrop(event, container, event.clientY <= bounds.top + 8 ? index : index + 1);
+        }
+      }}
+      onDragOver={(event) => hover(event)}
+      onDrop={(event) => {
+        const target = targetAt(event);
+        props.onDrop(event, target.container, target.index);
       }}
     >
       <div className="block-tools">
-        <button
-          aria-label={`Delete ${block.label}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onDelete(block.id);
-          }}
-          type="button"
-        >
-          ×
+        <button aria-label={`Delete ${block.label}`} title="Delete block" type="button"
+          onClick={(event) => { event.stopPropagation(); props.onDelete(block.id); }}>
+          <X size={14} aria-hidden="true" />
         </button>
       </div>
 
       {block.kind === "decision" ? (
         <>
           <div className="decision-head">
+            <svg className="decision-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M0 0 L50 100 L100 0" vectorEffect="non-scaling-stroke" />
+            </svg>
             <span className="block-label">{block.label}</span>
             {block.note ? <small>{block.note}</small> : null}
+            <span className="branch-label true-label">True</span>
+            <span className="branch-label false-label">False</span>
           </div>
-          <div className="decision-branches">
+          <div className="decision-branches" style={{ gridRow: `span ${rows - 1}` }}>
             <div className="branch-column">
-              <BlockList
-                activeSlot={activeSlot}
-                blocks={block.thenBranch ?? []}
-                container={`${block.id}:then`}
-                isDragging={isDragging}
-                onDelete={onDelete}
-                onDrop={onDrop}
-                onSelect={onSelect}
-                selectedId={selectedId}
-                setActiveSlot={setActiveSlot}
-                setIsDragging={setIsDragging}
-              />
+              <BlockList {...props} blocks={block.thenBranch ?? []} container={`${block.id}:then`} rows={rows - 1} />
             </div>
             <div className="branch-column">
-              <BlockList
-                activeSlot={activeSlot}
-                blocks={block.elseBranch ?? []}
-                container={`${block.id}:else`}
-                isDragging={isDragging}
-                onDelete={onDelete}
-                onDrop={onDrop}
-                onSelect={onSelect}
-                selectedId={selectedId}
-                setActiveSlot={setActiveSlot}
-                setIsDragging={setIsDragging}
-              />
+              <BlockList {...props} blocks={block.elseBranch ?? []} container={`${block.id}:else`} rows={rows - 1} />
             </div>
           </div>
         </>
-      ) : null}
-
-      {block.kind === "loop" ? (
+      ) : block.kind === "loop" ? (
         <>
           <div className="loop-head">
             <span className="block-label">{block.label}</span>
             {block.note ? <small>{block.note}</small> : null}
           </div>
-          <div className="loop-body">
-            <span className="loop-rail">Loop</span>
-            <BlockList
-              activeSlot={activeSlot}
-              blocks={block.body ?? []}
-              container={`${block.id}:body`}
-              isDragging={isDragging}
-              onDelete={onDelete}
-              onDrop={onDrop}
-              onSelect={onSelect}
-              selectedId={selectedId}
-              setActiveSlot={setActiveSlot}
-              setIsDragging={setIsDragging}
-            />
+          <div className="loop-body" style={{ gridRow: `span ${rows - 1}` }}>
+            <span className="loop-rail"><Repeat2 size={15} aria-hidden="true" /></span>
+            <BlockList {...props} blocks={block.body ?? []} container={`${block.id}:body`} rows={rows - 1} />
           </div>
         </>
-      ) : null}
-
-      {block.kind === "action" || block.kind === "io" ? (
-        <div className="simple-block-content">
+      ) : (
+        <div className="simple-block-content" style={{ gridRow: `span ${rows}` }}>
           <span className="block-label">{block.label}</span>
           {block.note ? <small>{block.note}</small> : null}
         </div>
-      ) : null}
+      )}
     </article>
   );
 }
@@ -1123,323 +1460,116 @@ function slugify(value: string) {
     .slice(0, 48);
 }
 
-async function renderDiagramToPng(title: string, blocks: DiagramBlock[]) {
-  const margin = 64;
-  const width = 1180;
-  const diagramWidth = width - margin * 2;
-  const titleHeight = 104;
-  const height = titleHeight + measureList(blocks, diagramWidth) + margin * 2;
-  const scale = 2;
-  const canvas = document.createElement("canvas");
-  canvas.width = width * scale;
-  canvas.height = height * scale;
-  const context = canvas.getContext("2d");
-
-  if (!context) {
-    throw new Error("Canvas is not available");
-  }
-
-  context.scale(scale, scale);
-  context.fillStyle = "#f8faf7";
-  context.fillRect(0, 0, width, height);
-  context.fillStyle = "#ffffff";
-  context.strokeStyle = "#111827";
-  context.lineWidth = 2;
-  context.fillRect(margin, margin, diagramWidth, height - margin * 2);
-  context.strokeRect(margin, margin, diagramWidth, height - margin * 2);
-
-  context.fillStyle = "#111827";
-  context.font = "700 30px Arial, sans-serif";
-  drawWrappedText(context, title || "Nassi-Shneiderman diagram", margin + 28, margin + 44, diagramWidth - 56, 34, 2);
-  context.font = "600 14px Arial, sans-serif";
-  context.fillStyle = "#64706a";
-  context.fillText("BetterNassi", margin + 28, margin + 86);
-
-  drawList(context, blocks, margin, margin + titleHeight, diagramWidth);
-
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(blob);
-      } else {
-        reject(new Error("PNG export failed"));
-      }
-    }, "image/png");
-  });
-}
-
 async function renderDiagramElementToPng(source: HTMLElement) {
-  const width = Math.ceil(source.scrollWidth);
-  const height = Math.ceil(source.scrollHeight);
-  const clone = source.cloneNode(true) as HTMLElement;
-  clone.classList.add("export-copy");
-  clone.style.transform = "none";
-  clone.style.width = `${width}px`;
-  clone.style.minHeight = `${height}px`;
-  clone.querySelectorAll(".selected").forEach((item) => {
-    item.classList.remove("selected");
-  });
-
-  const styles = collectDocumentStyles();
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-      <foreignObject width="100%" height="100%">
-        <div xmlns="http://www.w3.org/1999/xhtml">
-          <style>
-            ${styles}
-            .export-copy {
-              box-shadow: none !important;
-              margin: 0 !important;
-              max-width: none !important;
-            }
-            .export-copy .block-tools,
-            .export-copy .drop-slot {
-              display: none !important;
-            }
-          </style>
-          ${clone.outerHTML}
-        </div>
-      </foreignObject>
-    </svg>
-  `;
-
-  const image = await loadSvgImage(svg);
-  const scale = 2;
+  await document.fonts.ready;
+  const bounds = source.getBoundingClientRect();
+  const zoom = bounds.width / source.offsetWidth;
+  const width = bounds.width / zoom;
+  const height = bounds.height / zoom;
   const canvas = document.createElement("canvas");
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  canvas.width = Math.ceil(width * 2);
+  canvas.height = Math.ceil(height * 2);
   const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not available");
+  context.scale(2, 2);
+  const icons: Promise<void>[] = [];
 
-  if (!context) {
-    throw new Error("Canvas is not available");
+  // Paint the measured layout directly: no second layout engine or export-only sizing.
+  function paint(element: Element) {
+    if (!context || element.matches(".block-tools")) return;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    const x = (rect.left - bounds.left) / zoom;
+    const y = (rect.top - bounds.top) / zoom;
+    const w = rect.width / zoom;
+    const h = rect.height / zoom;
+    if (style.display === "none" || (style.visibility === "hidden" && !element.matches(".title-mirror"))) return;
+
+    if (element instanceof SVGElement) {
+      if (element.classList.contains("decision-lines")) {
+        context.strokeStyle = getComputedStyle(element.querySelector("path")!).stroke;
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(x, y);
+        context.lineTo(x + w / 2, y + h);
+        context.lineTo(x + w, y);
+        context.stroke();
+      } else if (element.tagName.toLowerCase() === "svg") {
+        const svg = element.cloneNode(true) as SVGElement;
+        svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        svg.setAttribute("style", `color:${style.color}`);
+        icons.push(new Promise<void>((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => { context.drawImage(image, x, y, w, h); resolve(); };
+          image.onerror = () => reject(new Error("Could not render diagram icon"));
+          image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+        }));
+      }
+      return;
+    }
+
+    context.fillStyle = style.backgroundColor;
+    context.fillRect(x, y, w, h);
+    const borders = [
+      [style.borderTopWidth, style.borderTopColor, x, y, w, parseFloat(style.borderTopWidth)],
+      [style.borderBottomWidth, style.borderBottomColor, x, y + h - parseFloat(style.borderBottomWidth), w, parseFloat(style.borderBottomWidth)],
+      [style.borderLeftWidth, style.borderLeftColor, x, y, parseFloat(style.borderLeftWidth), h],
+      [style.borderRightWidth, style.borderRightColor, x + w - parseFloat(style.borderRightWidth), y, parseFloat(style.borderRightWidth), h],
+    ] as const;
+    for (const [size, color, bx, by, bw, bh] of borders) {
+      if (parseFloat(size) > 0) {
+        context.fillStyle = color;
+        context.fillRect(bx, by, bw, bh);
+      }
+    }
+
+    if (element.matches(".block-label, .paper-title span, .paper-title strong, small, .branch-label")) {
+      const fontSize = parseFloat(style.fontSize);
+      const lineHeight = parseFloat(style.lineHeight) || fontSize * 1.4;
+      context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      context.fillStyle = style.color;
+      context.textAlign = style.textAlign === "center" ? "center" : "left";
+      context.textBaseline = "alphabetic";
+      const text = style.textTransform === "uppercase" ? element.textContent?.toUpperCase() : element.textContent;
+      const lines = style.whiteSpace === "nowrap"
+        ? [text ?? ""]
+        : wrapCanvasText(context, text ?? "", w);
+      lines.forEach((line, index) => {
+        context.fillText(line, context.textAlign === "center" ? x + w / 2 : x, y + (lineHeight - fontSize) / 2 + fontSize * .8 + index * lineHeight);
+      });
+      return;
+    }
+    for (const child of element.children) paint(child);
   }
 
-  context.scale(scale, scale);
-  context.fillStyle = "#fdfdfb";
-  context.fillRect(0, 0, width, height);
-  context.drawImage(image, 0, 0, width, height);
-
+  paint(source);
+  await Promise.all(icons);
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(blob);
-      } else {
-        reject(new Error("PNG export failed"));
-      }
-    }, "image/png");
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("PNG export failed")), "image/png");
   });
 }
 
-function collectDocumentStyles() {
-  return Array.from(document.styleSheets)
-    .map((sheet) => {
-      try {
-        return Array.from(sheet.cssRules)
-          .map((rule) => rule.cssText)
-          .join("\n");
-      } catch {
-        return "";
-      }
-    })
-    .join("\n");
-}
-
-function loadSvgImage(svg: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Diagram export image failed to load"));
-    };
-    image.src = url;
-  });
-}
-
-function measureList(blocks: DiagramBlock[], width: number): number {
-  if (blocks.length === 0) {
-    return 62;
-  }
-
-  return blocks.reduce((sum, block) => sum + measureBlock(block, width), 0);
-}
-
-function measureBlock(block: DiagramBlock, width: number): number {
-  if (block.kind === "decision") {
-    const branchWidth = width / 2;
-    return (
-      92 +
-      Math.max(
-        measureList(block.thenBranch ?? [], branchWidth),
-        measureList(block.elseBranch ?? [], branchWidth),
-      )
-    );
-  }
-
-  if (block.kind === "loop") {
-    return 82 + measureList(block.body ?? [], Math.max(260, width - 72));
-  }
-
-  return 78;
-}
-
-function drawList(
-  context: CanvasRenderingContext2D,
-  blocks: DiagramBlock[],
-  x: number,
-  y: number,
-  width: number,
-) {
-  if (blocks.length === 0) {
-    context.save();
-    context.setLineDash([8, 8]);
-    context.strokeStyle = "#a8b4ad";
-    context.strokeRect(x, y, width, 62);
-    context.setLineDash([]);
-    context.fillStyle = "#87918b";
-    context.font = "600 16px Arial, sans-serif";
-    context.textAlign = "center";
-    context.fillText("Empty", x + width / 2, y + 38);
-    context.restore();
-    return;
-  }
-
-  let cursor = y;
-  for (const block of blocks) {
-    const height = measureBlock(block, width);
-    drawBlock(context, block, x, cursor, width, height);
-    cursor += height;
-  }
-}
-
-function drawBlock(
-  context: CanvasRenderingContext2D,
-  block: DiagramBlock,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-) {
-  context.save();
-  context.strokeStyle = "#111827";
-  context.lineWidth = 2;
-  context.fillStyle =
-    block.kind === "io"
-      ? "#ecfeff"
-      : block.kind === "decision"
-        ? "#fff7ed"
-        : block.kind === "loop"
-          ? "#f0fdf4"
-          : "#ffffff";
-  context.fillRect(x, y, width, height);
-  context.strokeRect(x, y, width, height);
-
-  if (block.kind === "decision") {
-    const headHeight = 92;
-    const branchHeight = height - headHeight;
-    context.fillStyle = "#fff7ed";
-    context.fillRect(x, y, width, headHeight);
-    context.beginPath();
-    context.moveTo(x, y);
-    context.lineTo(x + width / 2, y + headHeight);
-    context.lineTo(x + width, y);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(x + width / 2, y + headHeight);
-    context.lineTo(x + width / 2, y + height);
-    context.stroke();
-
-    context.fillStyle = "#111827";
-    context.font = "700 20px Arial, sans-serif";
-    drawWrappedText(context, block.label, x + width * 0.25, y + 33, width * 0.5, 24, 2, "center");
-    drawList(context, block.thenBranch ?? [], x, y + headHeight, width / 2);
-    drawList(context, block.elseBranch ?? [], x + width / 2, y + headHeight, width / 2);
-
-    if (branchHeight > 0) {
-      context.strokeRect(x, y + headHeight, width / 2, branchHeight);
-      context.strokeRect(x + width / 2, y + headHeight, width / 2, branchHeight);
-    }
-    context.restore();
-    return;
-  }
-
-  if (block.kind === "loop") {
-    const headHeight = 82;
-    const railWidth = 72;
-    context.fillStyle = "#dcfce7";
-    context.fillRect(x, y, width, headHeight);
-    context.strokeRect(x, y, width, headHeight);
-    context.fillStyle = "#111827";
-    context.font = "700 20px Arial, sans-serif";
-    drawWrappedText(context, block.label, x + 24, y + 32, width - 48, 24, 2);
-    context.fillStyle = "#dcfce7";
-    context.fillRect(x, y + headHeight, railWidth, height - headHeight);
-    context.strokeRect(x, y + headHeight, railWidth, height - headHeight);
-    context.fillStyle = "#166534";
-    context.font = "700 13px Arial, sans-serif";
-    context.save();
-    context.translate(x + 26, y + headHeight + (height - headHeight) / 2);
-    context.rotate(-Math.PI / 2);
-    context.textAlign = "center";
-    context.fillText("LOOP", 0, 0);
-    context.restore();
-    drawList(context, block.body ?? [], x + railWidth, y + headHeight, width - railWidth);
-    context.restore();
-    return;
-  }
-
-  context.fillStyle = block.kind === "io" ? "#155e75" : "#111827";
-  context.font = "700 20px Arial, sans-serif";
-  drawWrappedText(context, block.label, x + 26, y + 33, width - 52, 24, 2);
-
-  if (block.note) {
-    context.fillStyle = "#64706a";
-    context.font = "600 13px Arial, sans-serif";
-    drawWrappedText(context, block.note, x + 26, y + 62, width - 52, 16, 1);
-  }
-
-  context.restore();
-}
-
-function drawWrappedText(
-  context: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineHeight: number,
-  maxLines: number,
-  align: CanvasTextAlign = "left",
-) {
-  const words = text.trim().split(/\s+/).filter(Boolean);
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, width: number) {
   const lines: string[] = [];
-  let line = "";
-
-  for (const word of words.length ? words : ["Untitled"]) {
-    const testLine = line ? `${line} ${word}` : word;
-    if (context.measureText(testLine).width > maxWidth && line) {
-      lines.push(line);
-      line = word;
-      if (lines.length === maxLines) {
-        break;
+  for (const paragraph of text.split("\n")) {
+    let line = "";
+    for (const word of paragraph.split(/\s+/)) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (context.measureText(candidate).width <= width) {
+        line = candidate;
+        continue;
       }
-    } else {
-      line = testLine;
+      if (line) lines.push(line);
+      line = "";
+      for (const character of word) {
+        if (line && context.measureText(line + character).width > width) {
+          lines.push(line);
+          line = "";
+        }
+        line += character;
+      }
     }
-  }
-
-  if (line && lines.length < maxLines) {
     lines.push(line);
   }
-
-  context.textAlign = align;
-  const drawX = align === "center" ? x + maxWidth / 2 : x;
-  lines.slice(0, maxLines).forEach((item, index) => {
-    context.fillText(item, drawX, y + index * lineHeight);
-  });
-  context.textAlign = "left";
+  return lines;
 }

@@ -34,10 +34,13 @@ test("server-renders the BetterNassi editor shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>BetterNassi<\/title>/i);
   assert.match(html, /Nassi-Shneiderman editor/);
-  assert.match(html, /Dark/);
-  assert.match(html, /Light/);
+  assert.match(html, /Dark theme/);
+  assert.match(html, /Light theme/);
+  assert.match(html, /Import File/);
+  assert.match(html, /Export File/);
   assert.match(html, /Export PNG/);
-  assert.match(html, /Order validation flow/);
+  assert.match(html, /Clear Diagram/);
+  assert.match(html, /Untitled diagram/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
